@@ -129,17 +129,21 @@ These properties are essential for correct platform identification and WEG coexi
 
 ## Boot args
 
-Boot args advised for testing (Hookcase in `/Library/Extensions/` too):
+Boot-argument notes for the current development code:
 
-FB-only:
+The examples below are historical test configurations, not drop-in boot arguments for every machine. The RPL test values (including `ngreen-dmc=adlp`, `-disablegfxfirmware`, and the experimental full-Metal flags) are **not automatically appropriate for genuine Tiger Lake**. Keep your known-working arguments and change one variable at a time.
+
+Framebuffer-only (diagnostic / isolation mode; **not the normal Tiger Lake path**):
 ```
--v keepsyms=1 debug=0x100 IGLogLevel=8 -ngreentglfb -NGreenDebug liludump=250 msgbuf=725288 liludbuf=725288 ngreen-dmc=adlp -ngreenv189
+-ngreentglfb
 ```
 
-FB+GFX:
+Framebuffer + hardware accelerator (required for the normal Gen11/Tiger Lake display path):
 ```
--v keepsyms=1 debug=0x100 IGLogLevel=8 -ngreentglwithgfx -NGreenDebug liludump=250 msgbuf=725288 liludbuf=725288 ngreen-dmc=adlp -ngreenv189 -allow3d -disablegfxfirmware -ngreenfullmtlcore
+-ngreentglwithgfx
 ```
+
+Start from the boot arguments already known to work on the target machine. Add `-NGreenDebug` only for diagnostics. Do **not** add `-allow3d` or `-ngreenfullmtlcore` during initial bring-up on genuine Tiger Lake; both are experimental and require separate validation. The RPL-specific argument bundle used by the maintainer is not a universal TGL configuration.
 
 Where:
 // Boot-arg "ngreen-dmc":
@@ -150,9 +154,9 @@ Where:
 //                       + combo PHY signal levels (PHY_A eDP)
 //   "icl"             → passthrough original ICL DMC load + ICL combo PHY signal levels
 
-> **Note:** `-ngreentglwithgfx` is required on Gen11/TGL hardware to load BOTH the TGL framebuffer AND the TGL HW (accelerator) kext. FB-only mode (`-ngreentglfb`) does not allocate per-plane DBUF on Gen11+ — the watermark/DBUF programming pipeline lives in the HW kext (`AppleIntelTGLGraphics.kext`), so without it the display engine fetches from a zero-block DBUF range and produces duplicated/fragmented output. `-ngreendp0 -ngreenv88` are diagnostic flags for the dp0/CPU-compositor investigation path. Remove them for normal operation.
-
-- **Note:** GPU bundles goes to  /Library/GPUBundles
+> **Note:** `-ngreentglwithgfx` is required on Gen11/TGL hardware to load both the TGL framebuffer and HW accelerator kexts. FB-only mode (`-ngreentglfb`) does not allocate per-plane DBUF on Gen11+ and can produce duplicated/fragmented output. `-ngreendp0 -ngreenv88` are diagnostic flags, not normal-operation defaults.
+>
+> **Package layout in this fork:** The custom Tiger Lake development artifact stages kernel extensions for OpenCore injection under `EFI/OC/Kexts/`. Its five companion user-space `.bundle` packages belong in `/Library/Extensions/` because the GPU-bundle lookup patch redirects there. Do not put `.bundle` files in `/Library/GPUBundles`, and do not install the unsigned experimental kernel extensions into `/Library/Extensions` as a substitute for OpenCore injection.
 
 | Arg | Purpose |
 |---|---|
@@ -240,38 +244,39 @@ Example Lilu log path:
 /Libtary/Logs/DiagnosticReports/..
 ```
 
-Additional developer note:
+## Installing the custom Tiger Lake development artifact
 
-```text
-[N.B. library is in continue developement]
+The fork's experimental artifact uses separate destinations for kernel extensions and user-space graphics bundles. Do not follow older notes in this README that say to place every item in `/Library/Extensions`, manually delete the Auxiliary Kernel Collection, or run cache-rebuild commands that target the sealed system collections.
 
-Developer from all over the world, are you ready?  Still needs some patches to my fully working RPL-P laptop but... it's open to developer now.
-No more IOPCIPrimaryMatch, we work on IOResource so just put your kexts (+ bundle) in /Library/Extensions folder or use /System/Library/Extensions kext
+### 1. Kernel extensions — OpenCore
 
-https://github.com/sgiammori/NootedGreen
+The CI artifact places these in `EFI/OC/Kexts/`:
 
-IOResources solving now is done like this for TGL kexts or IcL ketxts : first look at LE kexts and if any kexts is found than fallback to find in SLE kexts : * framebuffer for fb * + * graphics for gpu * + * bundle for metal *
+1. `Lilu.kext` (version 1.7.2 bundled with this repository)
+2. `NootedGreen.kext` (Lilu plugin)
+3. `HookCase-TGL.kext`
+4. `AppleIntelTGLGraphicsFramebuffer.kext`
+5. `AppleIntelTGLGraphics.kext`
 
-=> they need permissions fix (also Hookcase) so before move to /L/E do in some random folder, check below
-=> IOPCIPrimarymatch must be set in both *TGLGraphics* kexts in /Library/Extensiona
-```
+Copy the five kext folders into the existing EFI's `EFI/OC/Kexts/` directory, then configure and enable their entries under `Kernel -> Add` in the existing `config.plist`. Preserve a backup and do not replace the entire EFI or `config.plist` with a generated package.
 
-## Workflow for kexts (fb+Graphics+Hookcase in LE)
+NootedGreen requires Lilu 1.7.2 or newer. If the EFI already has a compatible newer Lilu, keep that Lilu and do not add a second Lilu entry; otherwise use the bundled 1.7.2 copy. Ensure Lilu loads before NootedGreen. The artifact's unsigned development kexts are intended for OpenCore injection; do not install those four unsigned kexts in `/Library/Extensions` or use `kmutil create --update-all` for them.
 
-```
-- sudo chmod -R 755 Apple*
-- sudo chown -R root:wheel Apple*
-- move the files to /L/E
-- delete /Library/KernelCollections/AuxiliaryKernelExtensions.kc
-- redo sudo chown -R root:wheel /Library/Extensions/Apple*
-- sudo kextcache -i /
-(if System asks you permissions, just allow and restart before to test)
+### 2. User-space graphics bundles — /Library/Extensions
 
-(maybe necessary this below also)
+Only the five `.bundle` directories from the artifact's `LibraryExtensions/` directory belong in `/Library/Extensions/`:
 
-sudo kmutil load -p /Library/Extensions/AppleIntelTGLGraphics.kext 2>&1
-sudo kextcache -i /
-```
+- `AppleIntelGraphicsShared.bundle`
+- `AppleIntelTGLGraphicsGLDriver.bundle`
+- `AppleIntelTGLGraphicsMTLDriver.bundle`
+- `AppleIntelTGLGraphicsVADriver.bundle`
+- `AppleIntelTGLGraphicsVAME.bundle`
+
+These legacy Apple bundles are copied unchanged. Do not ad-hoc re-sign them. Avoid blanket recursive permission changes; preserve package contents and modes. If ownership needs correcting after copying, change ownership only rather than changing every file's mode.
+
+### 3. Important limitations
+
+A successful CI build or a passing OpenCore config check does not show that the target machine will boot with the drivers or that Metal acceleration works. Genuine Tiger Lake support remains experimental. Keep a known-good EFI and recovery path, and test one change at a time. Do not manually delete `/Library/KernelCollections/AuxiliaryKernelExtensions.kc` or attempt to rebuild the sealed boot/system collections for this package.
 
 ## Compatibility-First Defaults
 
