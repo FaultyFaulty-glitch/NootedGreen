@@ -24,26 +24,34 @@ jobs:
           import plistlib
           from pathlib import Path
 
-          graphics_plist = Path(
-              "sle_Internal/le/AppleIntelTGLGraphics.kext/Contents/Info.plist"
-          )
-          with graphics_plist.open("rb") as stream:
-              root = plistlib.load(stream)
+          graphics_paths = [
+              Path("sle_Internal/le/AppleIntelTGLGraphics.kext/Contents/Info.plist"),
+              Path("sle_Internal/le/AppleIntelTGLGraphicsFramebuffer.kext/Contents/Info.plist"),
+          ]
+          for path in graphics_paths:
+              with path.open("rb") as stream:
+                  root = plistlib.load(stream)
 
-          matches = []
-          def walk(value):
-              if isinstance(value, dict):
-                  for key, item in value.items():
-                      if key == "IOPCIPrimaryMatch":
-                          matches.append(str(item).lower())
-                      walk(item)
-              elif isinstance(value, list):
-                  for item in value:
-                      walk(item)
+              matches = []
+              def walk(value):
+                  if isinstance(value, dict):
+                      for key, item in value.items():
+                          if key == "IOPCIPrimaryMatch":
+                              matches.append(str(item).lower())
+                          walk(item)
+                  elif isinstance(value, list):
+                      for item in value:
+                          walk(item)
 
-          walk(root)
-          if not any("0x9a498086" in value for value in matches):
-              raise SystemExit("ERROR: AppleIntelTGLGraphics.kext does not match 8086:9A49")
+              walk(root)
+              if not any("0x9a498086" in value for value in matches):
+                  raise SystemExit(
+                      f"ERROR: {path} does not match Intel device 8086:9A49"
+                  )
+              if "org.smichaud.HookCase" not in root.get("OSBundleLibraries", {}):
+                  raise SystemExit(
+                      f"ERROR: {path} does not declare its HookCase dependency"
+                  )
 
           hook_source = Path("HookCase-master/HookCase/HookCase.cpp").read_text()
           expected = hook_source.count("#if defined(HOOKCASE_TIGER_LAKE)")
@@ -52,7 +60,7 @@ jobs:
           if hook_source.count("callback->readReg32(0x44470)") != 2:
               raise SystemExit("ERROR: expected two Tiger Lake register reads at 0x44470")
 
-          print("Tiger Lake graphics match and HookCase source checks passed.")
+          print("Tiger Lake GPU match, HookCase dependency, and source checks passed.")
           PY
 
       - name: Show Xcode version
@@ -85,7 +93,7 @@ jobs:
             'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) HOOKCASE_TIGER_LAKE=1' \
             build
 
-      - name: Package source-built kexts
+      - name: Package and sign development drivers
         shell: bash
         run: |
           set -euo pipefail
@@ -107,24 +115,84 @@ jobs:
 
           ditto "$NGREEN_KEXT" dist/NootedGreen.kext
           ditto "$HOOKCASE_KEXT" dist/HookCase-TGL.kext
-          cp sle_Internal/le/AppleIntelTGLGraphics.kext/Contents/Info.plist \
-             dist/AppleIntelTGLGraphics-Info.plist
+          ditto sle_Internal/le/AppleIntelTGLGraphics.kext dist/AppleIntelTGLGraphics.kext
+          ditto sle_Internal/le/AppleIntelTGLGraphicsFramebuffer.kext dist/AppleIntelTGLGraphicsFramebuffer.kext
+
+          for name in \
+            AppleIntelGraphicsShared.bundle \
+            AppleIntelTGLGraphicsGLDriver.bundle \
+            AppleIntelTGLGraphicsMTLDriver.bundle \
+            AppleIntelTGLGraphicsVADriver.bundle \
+            AppleIntelTGLGraphicsVAME.bundle; do
+            ditto "sle_Internal/sle/$name" "dist/$name"
+          done
+
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+            dist/HookCase-TGL.kext/Contents/Info.plist > "$RUNNER_TEMP/hookcase-id.txt"
+          HOOKCASE_ID="$(cat "$RUNNER_TEMP/hookcase-id.txt")"
+          if [[ "$HOOKCASE_ID" != "org.smichaud.HookCase" ]]; then
+            echo "ERROR: HookCase bundle identifier is '$HOOKCASE_ID', expected org.smichaud.HookCase."
+            exit 1
+          fi
+
+          # Re-sign every staged code bundle ad hoc after all plist/bundle changes.
+          # This is for local experimental testing only; it is not a Developer ID signature.
+          bundles=(
+            dist/NootedGreen.kext
+            dist/HookCase-TGL.kext
+            dist/AppleIntelTGLGraphics.kext
+            dist/AppleIntelTGLGraphicsFramebuffer.kext
+            dist/AppleIntelGraphicsShared.bundle
+            dist/AppleIntelTGLGraphicsGLDriver.bundle
+            dist/AppleIntelTGLGraphicsMTLDriver.bundle
+            dist/AppleIntelTGLGraphicsVADriver.bundle
+            dist/AppleIntelTGLGraphicsVAME.bundle
+          )
+
+          for bundle in "${bundles[@]}"; do
+            echo "Ad-hoc signing $bundle"
+            codesign --force --deep --sign - "$bundle"
+            echo "Verifying $bundle"
+            codesign --verify --deep --strict --verbose=2 "$bundle"
+          done
+
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          required = [
+              "AppleIntelTGLGraphics.kext",
+              "AppleIntelTGLGraphicsFramebuffer.kext",
+          ]
+          for name in required:
+              path = Path("dist") / name / "Contents/Info.plist"
+              with path.open("rb") as stream:
+                  root = plistlib.load(stream)
+              if "org.smichaud.HookCase" not in root.get("OSBundleLibraries", {}):
+                  raise SystemExit(f"ERROR: {name} has no HookCase dependency after packaging")
+
+          print("Packaged driver metadata and HookCase dependency validated.")
+          PY
 
           cat > dist/README.txt <<'EOF'
           NootedGreen / HookCase Tiger Lake development build
-          Target: Intel Tiger Lake Iris Xe 8086:9A49
+          Target: Intel Tiger Lake Iris Xe device 8086:9A49
           macOS tested by this workflow: build environment only; runtime acceleration is NOT validated.
 
           Contents:
           - NootedGreen.kext: built from this repository revision.
-          - HookCase-TGL.kext: built with HOOKCASE_TIGER_LAKE=1 (port-mode register 0x44470).
-          - AppleIntelTGLGraphics-Info.plist: patched metadata from the repository's
-            sle_Internal/le/AppleIntelTGLGraphics.kext. It is not a complete driver kext.
+          - HookCase-TGL.kext: built with HOOKCASE_TIGER_LAKE=1 (register 0x44470).
+          - AppleIntelTGLGraphics.kext and AppleIntelTGLGraphicsFramebuffer.kext:
+            complete modified driver bundles from sle_Internal/le/.
+          - Five companion .bundle directories copied from sle_Internal/sle/.
 
-          The complete Apple driver kext bundles remain in the repository under
-          sle_Internal/le/. Do not mix driver files from different macOS builds.
-          Keep a known-good EFI and recovery boot path. This experimental build does
-          not guarantee Metal/3D acceleration on genuine Tiger Lake hardware.
+          All nine bundles are ad-hoc signed after packaging and verified by codesign.
+          Ad-hoc signing is not a Developer ID signature and does not guarantee that
+          macOS will load the extensions or that the GPU will accelerate.
+
+          Keep a known-good EFI and recovery boot path. Do not mix these drivers with
+          other macOS builds. Real Tiger Lake hardware acceleration is not validated
+          by this workflow.
           EOF
 
       - name: Upload Tiger Lake build artifact
