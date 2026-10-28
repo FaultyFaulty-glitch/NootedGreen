@@ -141,7 +141,7 @@ jobs:
 
           # The modified Apple TGL kext Info.plists no longer match their original
           # Apple signatures. For local Hackintosh testing with SIP's kext-signing
-          # enforcement disabled, package the three kernel extensions unsigned.
+          # enforcement disabled, package the four modified/development kernel extensions unsigned.
           # Do NOT ad-hoc sign them: kmutil can reject ad-hoc-signed kexts as a
           # "Bad code signature". Remove both Mach-O signatures and bundle seals.
           for bundle in \
