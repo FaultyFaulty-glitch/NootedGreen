@@ -16914,7 +16914,11 @@ uint32_t AppleInteePortHAL::probePortMode()
     //   ICL  (AppleIntelFramebufferController path): 0xC4030 (ICL_SHOTPLUG_CTL_DDI)
     //   TGL:                                         0x44470
     //   ADL-P / RPL-P:                               0x1638a0
-    uint32_t registerValue = callback->readReg32(0x1638a0); // ADL-P/RPL-P
+    #if defined(HOOKCASE_TIGER_LAKE)
+        uint32_t registerValue = callback->readReg32(0x44470); // Tiger Lake
+#else
+        uint32_t registerValue = callback->readReg32(0x1638a0); // ADL-P/RPL-P
+#endif
         
         PortMode mode = kPortModeInvalid;
         uint32_t portType = *getMember<uint32_t*>(this, 0x548);
@@ -17106,7 +17110,11 @@ uint32_t AppleIntelPortHAL::probePortMode()
     //   ICL  (AppleIntelFramebufferController path): 0xC4030 (ICL_SHOTPLUG_CTL_DDI)
     //   TGL:                                         0x44470
     //   ADL-P / RPL-P:                               0x1638a0
-    uint32_t registerValue = callback->readReg32(0x1638a0); // ADL-P/RPL-P
+    #if defined(HOOKCASE_TIGER_LAKE)
+        uint32_t registerValue = callback->readReg32(0x44470); // Tiger Lake
+#else
+        uint32_t registerValue = callback->readReg32(0x1638a0); // ADL-P/RPL-P
+#endif
         
         PortMode mode = kPortModeInvalid;
         uint32_t portType = *getMember<uint32_t*>(this, 0x548);
