@@ -343,7 +343,7 @@ For GPU acceleration, the following userspace driver bundles must be installed i
 | `AppleIntelTGLGraphicsVAME.bundle` | VA Media Engine |
 | `AppleIntelGraphicsShared.bundle` | Shared graphics library |
 
-These bundles are loaded by name (via `MetalPluginName`, `IOGLBundleName`, etc.), not by `CFBundleIdentifier`. They are not shipped with NootedGreen and must be sourced separately.
+These bundles are loaded by name (via `MetalPluginName`, `IOGLBundleName`, etc.), not by `CFBundleIdentifier`. Upstream NootedGreen does not ship these proprietary bundles as part of a supported release. This fork's experimental artifact currently copies legacy files from `sle_Internal/sle/` unchanged. Some report obsolete resource-envelope warnings under modern `codesign`; their runtime compatibility with Sonoma 14.8.9 is not validated by CI. Do not interpret their presence in the artifact or a successful build as proof that they will load or accelerate graphics.
 
 ### Driver path resolution and fallback order
 
@@ -375,7 +375,7 @@ NootedGreen (Gen11/Gen12 — TGL driver spoofing):
 
 | Platform | Status | Est. | Notes |
 |----------|--------|------|-------|
-| **Tiger Lake** | ~90% | V52 | RPL-specific patches auto-skipped via CPUID. GuC, topology, ForceWake, BCS all use native Apple paths. Remaining risk: SKU bypass hook + DYLD patches still in the path. No real TGL hardware tested yet. |
+| **Tiger Lake** | Experimental | V52 | RPL-specific patches are auto-skipped via CPUID. Partial external reports exist on real Tiger Lake, but the full framebuffer/accelerator/Metal path is not confirmed stable. Remaining risk includes SKU bypass and DYLD patches. |
 | **Raptor Lake-P** | ~70% | V80L | Primary dev platform (i7-13700H). System boots to login on macOS 14.7.1 (`23H222`). GPU reset storm tamed: V153/V154 circuit-breaker confirmed working. `userspace watchdog timeout` KP root cause identified and fixed: V80L plane-linearization in `v71EmrEnforcer` was fighting WindowServer over plane registers every 50ms — now limited to first 3 ticks. Brief display flash at boot preserved. Active work: V158 execlist/CSB drain. |
 | **Alder Lake** | ~35% | — | Same Gen12 arch as RPL, should behave similarly. Untested. |
 | **Rocket Lake** | ~25% | — | Gen12 LP but different display engine. Untested. |
