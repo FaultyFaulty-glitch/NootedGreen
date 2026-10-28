@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate Tiger Lake patches
         shell: bash
@@ -97,7 +97,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist/EFI/OC/Kexts dist/LibraryExtensions
 
           NGREEN_KEXT="$(find "$RUNNER_TEMP/NootedGreenDerivedData/Build/Products" \
             -type d -path "*/Release/NootedGreen.kext" -print -quit)"
@@ -113,10 +113,14 @@ jobs:
             exit 1
           fi
 
-          ditto "$NGREEN_KEXT" dist/NootedGreen.kext
-          ditto "$HOOKCASE_KEXT" dist/HookCase-TGL.kext
-          ditto sle_Internal/le/AppleIntelTGLGraphics.kext dist/AppleIntelTGLGraphics.kext
-          ditto sle_Internal/le/AppleIntelTGLGraphicsFramebuffer.kext dist/AppleIntelTGLGraphicsFramebuffer.kext
+          # Keep all kernel extensions in the OpenCore staging directory. This avoids
+          # asking kmutil to add unsigned development kexts to the Auxiliary KC, and
+          # keeps the Lilu plugin next to the Lilu dependency that provides it.
+          ditto Lilu.kext dist/EFI/OC/Kexts/Lilu.kext
+          ditto "$NGREEN_KEXT" dist/EFI/OC/Kexts/NootedGreen.kext
+          ditto "$HOOKCASE_KEXT" dist/EFI/OC/Kexts/HookCase-TGL.kext
+          ditto sle_Internal/le/AppleIntelTGLGraphics.kext dist/EFI/OC/Kexts/AppleIntelTGLGraphics.kext
+          ditto sle_Internal/le/AppleIntelTGLGraphicsFramebuffer.kext dist/EFI/OC/Kexts/AppleIntelTGLGraphicsFramebuffer.kext
 
           for name in \
             AppleIntelGraphicsShared.bundle \
@@ -124,11 +128,11 @@ jobs:
             AppleIntelTGLGraphicsMTLDriver.bundle \
             AppleIntelTGLGraphicsVADriver.bundle \
             AppleIntelTGLGraphicsVAME.bundle; do
-            ditto "sle_Internal/sle/$name" "dist/$name"
+            ditto "sle_Internal/sle/$name" "dist/LibraryExtensions/$name"
           done
 
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
-            dist/HookCase-TGL.kext/Contents/Info.plist > "$RUNNER_TEMP/hookcase-id.txt"
+            dist/EFI/OC/Kexts/HookCase-TGL.kext/Contents/Info.plist > "$RUNNER_TEMP/hookcase-id.txt"
           HOOKCASE_ID="$(cat "$RUNNER_TEMP/hookcase-id.txt")"
           if [[ "$HOOKCASE_ID" != "org.smichaud.HookCase" ]]; then
             echo "ERROR: HookCase bundle identifier is '$HOOKCASE_ID', expected org.smichaud.HookCase."
@@ -140,7 +144,11 @@ jobs:
           # enforcement disabled, package the three kernel extensions unsigned.
           # Do NOT ad-hoc sign them: kmutil can reject ad-hoc-signed kexts as a
           # "Bad code signature". Remove both Mach-O signatures and bundle seals.
-          for bundle in dist/*.kext; do
+          for bundle in \
+            dist/EFI/OC/Kexts/NootedGreen.kext \
+            dist/EFI/OC/Kexts/HookCase-TGL.kext \
+            dist/EFI/OC/Kexts/AppleIntelTGLGraphics.kext \
+            dist/EFI/OC/Kexts/AppleIntelTGLGraphicsFramebuffer.kext; do
             if [[ -d "$bundle/Contents/MacOS" ]]; then
               while IFS= read -r -d '' executable; do
                 /usr/bin/codesign --remove-signature "$executable" >/dev/null 2>&1 || true
@@ -153,7 +161,7 @@ jobs:
           # These legacy Apple bundles can report "resource envelope is obsolete"
           # under newer codesign versions. This warning is recorded but not treated
           # as a packaging failure; the source bundles are not altered or re-signed.
-          for bundle in dist/*.bundle; do
+          for bundle in dist/LibraryExtensions/*.bundle; do
             echo "Checking legacy Apple bundle signature: $bundle"
             if ! codesign --verify --deep --verbose=2 "$bundle"; then
               echo "::warning::Legacy bundle signature verification reported a warning/error for $bundle; source files are retained unchanged."
@@ -165,69 +173,143 @@ jobs:
           import plistlib
           from pathlib import Path
 
+          root = Path("dist")
+          kext_root = root / "EFI/OC/Kexts"
+          library_root = root / "LibraryExtensions"
+
+          def read_plist(path):
+              with path.open("rb") as stream:
+                  return plistlib.load(stream)
+
+          def version(value):
+              try:
+                  return tuple(int(part) for part in str(value).split("."))
+              except ValueError:
+                  raise SystemExit(f"ERROR: invalid version string: {value!r}")
+
+          # A Lilu plugin must declare the same minimum version that the README requires.
+          lilu = read_plist(kext_root / "Lilu.kext/Contents/Info.plist")
+          ngreen = read_plist(kext_root / "NootedGreen.kext/Contents/Info.plist")
+          required_lilu = ngreen.get("OSBundleLibraries", {}).get("as.vit9696.Lilu")
+          if lilu.get("CFBundleIdentifier") != "as.vit9696.Lilu":
+              raise SystemExit("ERROR: bundled Lilu.kext has the wrong bundle identifier")
+          if version(lilu.get("CFBundleVersion", "0")) < (1, 7, 2):
+              raise SystemExit("ERROR: bundled Lilu is older than 1.7.2")
+          if not required_lilu or version(required_lilu) < (1, 7, 2):
+              raise SystemExit("ERROR: NootedGreen must require Lilu 1.7.2 or newer")
+
           for name in (
               "AppleIntelTGLGraphics.kext",
               "AppleIntelTGLGraphicsFramebuffer.kext",
           ):
-              path = Path("dist") / name / "Contents/Info.plist"
-              with path.open("rb") as stream:
-                  root = plistlib.load(stream)
-              if "org.smichaud.HookCase" not in root.get("OSBundleLibraries", {}):
+              path = kext_root / name / "Contents/Info.plist"
+              root_plist = read_plist(path)
+              if "org.smichaud.HookCase" not in root_plist.get("OSBundleLibraries", {}):
                   raise SystemExit(f"ERROR: {name} has no HookCase dependency")
-              if not any(
-                  "0x9a498086" in str(value).lower()
-                  for key, value in root.get("IOKitPersonalities", {}).items()
-                  if isinstance(value, dict)
-                  for value in value.values()
-                  if isinstance(value, str)
-              ):
-                  # The explicit match check below traverses nested personality dictionaries.
-                  matches = []
-                  def walk(value):
-                      if isinstance(value, dict):
-                          for key, item in value.items():
-                              if key == "IOPCIPrimaryMatch":
-                                  matches.append(str(item).lower())
-                              walk(item)
-                      elif isinstance(value, list):
-                          for item in value:
-                              walk(item)
-                  walk(root)
-                  if not any("0x9a498086" in match for match in matches):
-                      raise SystemExit(f"ERROR: {name} does not match device 8086:9A49")
+              matches = []
+              def walk(value):
+                  if isinstance(value, dict):
+                      for key, item in value.items():
+                          if key == "IOPCIPrimaryMatch":
+                              matches.append(str(item).lower())
+                          walk(item)
+                  elif isinstance(value, list):
+                      for item in value:
+                          walk(item)
+              walk(root_plist)
+              if not any("0x9a498086" in match for match in matches):
+                  raise SystemExit(f"ERROR: {name} does not match device 8086:9A49")
 
-          for name in ("NootedGreen.kext", "HookCase-TGL.kext",
-                       "AppleIntelTGLGraphics.kext",
-                       "AppleIntelTGLGraphicsFramebuffer.kext"):
-              if (Path("dist") / name / "Contents/_CodeSignature").exists():
-                  raise SystemExit(f"ERROR: expected unsigned test kext: {name}")
+          hookcase = read_plist(kext_root / "HookCase-TGL.kext/Contents/Info.plist")
+          if hookcase.get("CFBundleIdentifier") != "org.smichaud.HookCase":
+              raise SystemExit("ERROR: HookCase bundle identifier is wrong")
 
-          print("Kernel-kext packaging, GPU match, and HookCase dependencies validated.")
+          expected_kexts = {
+              "Lilu.kext", "NootedGreen.kext", "HookCase-TGL.kext",
+              "AppleIntelTGLGraphics.kext",
+              "AppleIntelTGLGraphicsFramebuffer.kext",
+          }
+          actual_kexts = {p.name for p in kext_root.glob("*.kext")}
+          if actual_kexts != expected_kexts:
+              raise SystemExit(
+                  f"ERROR: wrong OpenCore kext staging set: {sorted(actual_kexts)}"
+              )
+          if list(library_root.glob("*.kext")):
+              raise SystemExit("ERROR: kernel extensions must not be staged with user-space bundles")
+          expected_bundles = {
+              "AppleIntelGraphicsShared.bundle",
+              "AppleIntelTGLGraphicsGLDriver.bundle",
+              "AppleIntelTGLGraphicsMTLDriver.bundle",
+              "AppleIntelTGLGraphicsVADriver.bundle",
+              "AppleIntelTGLGraphicsVAME.bundle",
+          }
+          actual_bundles = {p.name for p in library_root.glob("*.bundle")}
+          if actual_bundles != expected_bundles:
+              raise SystemExit(
+                  f"ERROR: wrong user-space bundle staging set: {sorted(actual_bundles)}"
+              )
+
+          print("OpenCore kext layout, Lilu dependency, 9A49 matching, and user-space bundle layout validated.")
           PY
 
           cat > dist/README.txt <<'EOF'
           NootedGreen / HookCase Tiger Lake development build
           Target: Intel Tiger Lake Iris Xe device 8086:9A49
-          Runtime acceleration is NOT validated by this workflow.
+          Runtime graphics acceleration is NOT validated by this workflow.
 
-          Kernel extensions (NootedGreen.kext, HookCase-TGL.kext,
-          AppleIntelTGLGraphics.kext and AppleIntelTGLGraphicsFramebuffer.kext)
-          are intentionally unsigned for personal development testing. The modified
-          Apple driver Info.plists no longer match their original Apple bundle seals.
-          They require an Intel Hackintosh test configuration that permits unsigned
-          kernel extensions (SIP kext-signing enforcement disabled). AMFI boot args
-          alone do not prove that SIP's kext-signing policy is disabled.
+          Layout
+          ------
+          EFI/OC/Kexts/ contains the five kernel extensions:
+            Lilu.kext
+            NootedGreen.kext
+            HookCase-TGL.kext
+            AppleIntelTGLGraphicsFramebuffer.kext
+            AppleIntelTGLGraphics.kext
 
-          The five companion .bundle directories were copied unchanged and retain
-          their original Apple signatures. Do not ad-hoc re-sign them.
+          LibraryExtensions/ contains the five companion user-space .bundle packages.
 
-          Preserve a known-good EFI and recovery path. Do not mix these files with
-          graphics drivers from another macOS build. Successful build or diagnostics
-          do not guarantee the accelerator or display pipeline will work.
+          OpenCore installation
+          ---------------------
+          Copy the five .kext folders from EFI/OC/Kexts/ into the existing EFI's
+          EFI/OC/Kexts/ directory. Do NOT replace the whole EFI or config.plist.
+          Add/enable them under Kernel -> Add in this order:
+            1. Lilu.kext
+            2. NootedGreen.kext
+            3. HookCase-TGL.kext
+            4. AppleIntelTGLGraphicsFramebuffer.kext
+            5. AppleIntelTGLGraphics.kext
+
+          NootedGreen is a Lilu plugin. Lilu 1.7.2 or newer must be enabled before
+          NootedGreen. If your EFI already has a newer Lilu, keep that version and
+          do not add a duplicate Lilu entry; only use the bundled Lilu if needed.
+          Do not install NootedGreen.kext into /Library/Extensions.
+
+          User-space bundle installation
+          -------------------------------
+          Only the five .bundle folders from LibraryExtensions/ belong in
+          /Library/Extensions/. Preserve their contents and existing file modes;
+          do not ad-hoc re-sign the legacy Apple bundles. The GPU bundle lookup
+          patch expects them in /Library/Extensions, not /Library/GPUBundles.
+
+          Signature and test limitations
+          --------------------------------
+          The four non-Lilu kernel extensions in this experiment are intentionally
+          unsigned because the modified Apple driver Info.plists no longer match
+          their original Apple seals. They are staged for OpenCore injection, not
+          for kmutil/Auxiliary Kernel Collection installation. Do not put these
+          unsigned .kext folders in /Library/Extensions and do not run kmutil
+          create --update-all for this package.
+
+          Preserve a known-good EFI and recovery path. Build success does not
+          demonstrate a successful boot, display initialization, or Metal support.
+          For genuine Tiger Lake, -ngreentglwithgfx loads both framebuffer and
+          accelerator drivers; -ngreentglfb is diagnostic-only and may not produce
+          a coherent display. Do not enable experimental 3D acceleration until
+          the base display path is confirmed stable.
           EOF
 
       - name: Upload Tiger Lake build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: NootedGreen-TigerLake-development
           path: dist/
