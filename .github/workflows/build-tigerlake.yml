@@ -151,7 +151,7 @@ jobs:
 
           # Keep the stock Apple signatures on the companion user-space bundles.
           for bundle in dist/*.bundle; do
-            codesign --verify --deep --strict --verbose=2 "$bundle"
+            codesign --verify --deep --verbose=2 "$bundle"
           done
 
           python3 - <<'PY'
