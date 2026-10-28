@@ -93,7 +93,7 @@ jobs:
             'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) HOOKCASE_TIGER_LAKE=1' \
             build
 
-      - name: Package and sign development drivers
+      - name: Package unsigned development kexts and original-signed user-space bundles
         shell: bash
         run: |
           set -euo pipefail
@@ -135,24 +135,22 @@ jobs:
             exit 1
           fi
 
-          # Re-sign every staged code bundle ad hoc after all plist/bundle changes.
-          # This is for local experimental testing only; it is not a Developer ID signature.
-          bundles=(
-            dist/NootedGreen.kext
-            dist/HookCase-TGL.kext
-            dist/AppleIntelTGLGraphics.kext
-            dist/AppleIntelTGLGraphicsFramebuffer.kext
-            dist/AppleIntelGraphicsShared.bundle
-            dist/AppleIntelTGLGraphicsGLDriver.bundle
-            dist/AppleIntelTGLGraphicsMTLDriver.bundle
-            dist/AppleIntelTGLGraphicsVADriver.bundle
-            dist/AppleIntelTGLGraphicsVAME.bundle
-          )
+          # The modified Apple TGL kext Info.plists no longer match their original
+          # Apple signatures. For local Hackintosh testing with SIP's kext-signing
+          # enforcement disabled, package the three kernel extensions unsigned.
+          # Do NOT ad-hoc sign them: kmutil can reject ad-hoc-signed kexts as a
+          # "Bad code signature". Remove both Mach-O signatures and bundle seals.
+          for bundle in dist/*.kext; do
+            if [[ -d "$bundle/Contents/MacOS" ]]; then
+              while IFS= read -r -d '' executable; do
+                /usr/bin/codesign --remove-signature "$executable" >/dev/null 2>&1 || true
+              done < <(find "$bundle/Contents/MacOS" -type f -print0)
+            fi
+            rm -rf "$bundle/Contents/_CodeSignature"
+          done
 
-          for bundle in "${bundles[@]}"; do
-            echo "Ad-hoc signing $bundle"
-            codesign --force --deep --sign - "$bundle"
-            echo "Verifying $bundle"
+          # Keep the stock Apple signatures on the companion user-space bundles.
+          for bundle in dist/*.bundle; do
             codesign --verify --deep --strict --verbose=2 "$bundle"
           done
 
@@ -160,39 +158,65 @@ jobs:
           import plistlib
           from pathlib import Path
 
-          required = [
+          for name in (
               "AppleIntelTGLGraphics.kext",
               "AppleIntelTGLGraphicsFramebuffer.kext",
-          ]
-          for name in required:
+          ):
               path = Path("dist") / name / "Contents/Info.plist"
               with path.open("rb") as stream:
                   root = plistlib.load(stream)
               if "org.smichaud.HookCase" not in root.get("OSBundleLibraries", {}):
-                  raise SystemExit(f"ERROR: {name} has no HookCase dependency after packaging")
+                  raise SystemExit(f"ERROR: {name} has no HookCase dependency")
+              if not any(
+                  "0x9a498086" in str(value).lower()
+                  for key, value in root.get("IOKitPersonalities", {}).items()
+                  if isinstance(value, dict)
+                  for value in value.values()
+                  if isinstance(value, str)
+              ):
+                  # The explicit match check below traverses nested personality dictionaries.
+                  matches = []
+                  def walk(value):
+                      if isinstance(value, dict):
+                          for key, item in value.items():
+                              if key == "IOPCIPrimaryMatch":
+                                  matches.append(str(item).lower())
+                              walk(item)
+                      elif isinstance(value, list):
+                          for item in value:
+                              walk(item)
+                  walk(root)
+                  if not any("0x9a498086" in match for match in matches):
+                      raise SystemExit(f"ERROR: {name} does not match device 8086:9A49")
 
-          print("Packaged driver metadata and HookCase dependency validated.")
+          for name in ("NootedGreen.kext", "HookCase-TGL.kext",
+                       "AppleIntelTGLGraphics.kext",
+                       "AppleIntelTGLGraphicsFramebuffer.kext"):
+              if (Path("dist") / name / "Contents/_CodeSignature").exists():
+                  raise SystemExit(f"ERROR: expected unsigned test kext: {name}")
+
+          print("Kernel-kext packaging, GPU match, and HookCase dependencies validated.")
           PY
 
           cat > dist/README.txt <<'EOF'
           NootedGreen / HookCase Tiger Lake development build
           Target: Intel Tiger Lake Iris Xe device 8086:9A49
-          macOS tested by this workflow: build environment only; runtime acceleration is NOT validated.
+          Runtime acceleration is NOT validated by this workflow.
 
-          Contents:
-          - NootedGreen.kext: built from this repository revision.
-          - HookCase-TGL.kext: built with HOOKCASE_TIGER_LAKE=1 (register 0x44470).
-          - AppleIntelTGLGraphics.kext and AppleIntelTGLGraphicsFramebuffer.kext:
-            complete modified driver bundles from sle_Internal/le/.
-          - Five companion .bundle directories copied from sle_Internal/sle/.
+          Kernel extensions (NootedGreen.kext, HookCase-TGL.kext,
+          AppleIntelTGLGraphics.kext and AppleIntelTGLGraphicsFramebuffer.kext)
+          are intentionally unsigned for personal development testing. The modified
+          Apple driver Info.plists no longer match their original Apple bundle seals.
+          They require an Intel Hackintosh test configuration that permits unsigned
+          kernel extensions (SIP kext-signing enforcement disabled). AMFI boot args
+          alone do not prove that SIP's kext-signing policy is disabled.
 
-          All nine bundles are ad-hoc signed after packaging and verified by codesign.
-          Ad-hoc signing is not a Developer ID signature and does not guarantee that
-          macOS will load the extensions or that the GPU will accelerate.
+          The five companion .bundle directories were copied unchanged and retain
+          their original Apple signatures. Do not ad-hoc re-sign them.
 
-          Keep a known-good EFI and recovery boot path. Do not mix these drivers with
-          other macOS builds. Real Tiger Lake hardware acceleration is not validated
-          by this workflow.
+          Preserve a known-good EFI and recovery path. Do not mix these files with
+          graphics drivers from another macOS build. Successful build or diagnostics
+          do not guarantee the accelerator or display pipeline will work.
           EOF
 
       - name: Upload Tiger Lake build artifact
