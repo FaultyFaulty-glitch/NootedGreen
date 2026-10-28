@@ -270,26 +270,30 @@ jobs:
 
           OpenCore installation
           ---------------------
-          Copy the five .kext folders from EFI/OC/Kexts/ into the existing EFI's
-          EFI/OC/Kexts/ directory. Do NOT replace the whole EFI or config.plist.
-          Add/enable them under Kernel -> Add in this order:
-            1. Lilu.kext
+          Back up the working EFI before editing. Do NOT replace the whole EFI or
+          config.plist. Update Kernel -> Add entries in the existing config.plist;
+          keep only one enabled copy of each kext/bundle identifier.
+          If the EFI already contains one of these kexts, replace/update that existing
+          copy and its existing entry instead of adding a duplicate:
+            1. Lilu.kext (only use the bundled copy if the existing Lilu is older than 1.7.2)
             2. NootedGreen.kext
-            3. HookCase-TGL.kext
+            3. HookCase-TGL.kext (disable/remove any older HookCase entry)
             4. AppleIntelTGLGraphicsFramebuffer.kext
             5. AppleIntelTGLGraphics.kext
 
-          NootedGreen is a Lilu plugin. Lilu 1.7.2 or newer must be enabled before
-          NootedGreen. If your EFI already has a newer Lilu, keep that version and
-          do not add a duplicate Lilu entry; only use the bundled Lilu if needed.
-          Do not install NootedGreen.kext into /Library/Extensions.
+          Load Lilu before NootedGreen. Keep an existing Lilu >= 1.7.2 and do not add
+          the bundled Lilu as a second copy. Do not install NootedGreen.kext into
+          /Library/Extensions. Do not enable the experimental -allow3d option during
+          initial display bring-up on real Tiger Lake hardware.
 
           User-space bundle installation
           -------------------------------
           Only the five .bundle folders from LibraryExtensions/ belong in
-          /Library/Extensions/. Preserve their contents and existing file modes;
-          do not ad-hoc re-sign the legacy Apple bundles. The GPU bundle lookup
-          patch expects them in /Library/Extensions, not /Library/GPUBundles.
+          /Library/Extensions/. These are legacy source bundles copied unchanged from
+          sle_Internal/sle; codesign on recent macOS reports obsolete resource-envelope
+          warnings for some of them, and Sonoma runtime compatibility is unverified.
+          Do not ad-hoc re-sign them. The GPU bundle lookup patch expects them in
+          /Library/Extensions, not /Library/GPUBundles.
 
           Signature and test limitations
           --------------------------------
